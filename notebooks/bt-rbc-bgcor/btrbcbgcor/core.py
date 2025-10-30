@@ -21,7 +21,7 @@ from transformers import get_linear_schedule_with_warmup
 import wandb
 
 from .models.simsiam import SimSiam
-from .models.siamnet_bgcor import SimSiam_BG
+from .models.bt_bgcor import BarlowTwins_BG
 from .src.data_handler import (
     get_clstoken,
     get_dr_feature,
@@ -32,7 +32,7 @@ from .src.image_aug import SSLTransform, SSLTransform2
 from .models.vit import VitForClassification
 from .src.trainer import Trainer
 
-class SSRBC:
+class BTRBC:
     def __init__(
             self, config_path: str
             ):
@@ -102,18 +102,18 @@ class SSRBC:
         return dataset_lst 
 
 
-    def fit(self, train_loader, test_loader, ssconfig={}, model="ss", warmup=True, run=None):
+    def fit(self, train_loader, test_loader, btconfig={}, model="ss", warmup=True, run=None):
         """ training """
         # モデル等の準備 (Classの有無でSSとViTを切り替え)
-        self.latent_id = ssconfig["latent_id"]
+        self.latent_id = btconfig["latent_id"]
         if model == "ss":
-            self.latent_id = ssconfig["latent_id"]
+            self.latent_id = btconfig["latent_id"]
             self.backbone = VitForClassification(self.config)
-            self.model = SimSiam(self.backbone, self.latent_id, ssconfig["projection_sizes"])
+            self.model = SimSiam(self.backbone, self.latent_id, btconfig["projection_sizes"])
         elif model == "bgcor":
-            self.latent_id = ssconfig["latent_id"]
+            self.latent_id = btconfig["latent_id"]
             self.backbone = VitForClassification(self.config)
-            self.model = SimSiam_BG(self.backbone, self.latent_id, ssconfig["projection_sizes"])            
+            self.model = BarlowTwins_BG(self.backbone, self.latent_id, btconfig["projection_sizes"], btconfig["lambd"], scale_factor=btconfig["scale_factor"])            
         else:
             self.model = VitForClassification(self.config)
 
@@ -161,7 +161,7 @@ class SSRBC:
             train_loader, test_loader, save_model_evry_n_epochs=self.config["save_model_every"]
             )
         
-        avg_loss = trainer.evaluate(test_loader)
+        avg_loss, avg_on_diag, avg_off_diag = trainer.evaluate(test_loader)
         print(f"Average Loss: {avg_loss}")
         print(f"Best epoch: {trainer.best_epoch}")
         self.best_epoch = trainer.best_epoch
@@ -172,7 +172,7 @@ class SSRBC:
         artifact = wandb.Artifact(
             name=self.config["exp_name"], # 'my-vit-model'のような管理しやすい名前
             type="model",
-            metadata={"best_epoch": self.best_epoch, "config": self.config, "ssconfig": ssconfig} # メタデータも記録可能
+            metadata={"best_epoch": self.best_epoch, "config": self.config, "btconfig": btconfig} # メタデータも記録可能
             )
         best_model_path = f"{base_dir}/{self.config['exp_name']}/model_{self.best_epoch}.pt"
         artifact.add_file(best_model_path)

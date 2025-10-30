@@ -66,14 +66,21 @@ class NetWrapper(nn.Module):
         representation = representation[:, 0, :] # CLSトークンである一番上を取得
 
         return representation
+    
+
+def off_diagonal(x):
+    """ return a flattened view of the off-diagonal elements of a square matrix """
+    n, m = x.shape
+    assert n==m
+    return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
 
 
-class SimSiam_BG(nn.Module):
+class BarlowTwins_BG(nn.Module):
     """
-
+    single GPU version based on https://github.com/facebookresearch/barlowtwins
 
     """
-    def __init__(self, backbone, latent_id, projection_sizes):
+    def __init__(self, backbone, latent_id, projection_sizes, lambd, scale_factor=1):
         """
         Parameters
         ----------
@@ -89,8 +96,10 @@ class SimSiam_BG(nn.Module):
 
         """
         super().__init__()
-        self.backbone = NetWrapper(backbone, layer=latent_id)
-
+        self.backbone = backbone
+        self.backbone = NetWrapper(self.backbone, latent_id)
+        self.lambd = lambd
+        self.scale_factor = scale_factor
         # projector
         sizes = projection_sizes
         layers = []
@@ -100,40 +109,25 @@ class SimSiam_BG(nn.Module):
             layers.append(nn.ReLU(inplace=True))
         layers.append(nn.Linear(sizes[-2], sizes[-1], bias=False)) # BatchNorm入れるのでbias=False
         self.projector = nn.Sequential(*layers)
-
-        # predictor
-        self.predictor = nn.Sequential(
-            nn.Linear(sizes[-1], sizes[-1], bias=False),
-            nn.BatchNorm1d(sizes[-1]),
-            nn.ReLU(inplace=True),
-            nn.Linear(sizes[-1], sizes[-1])
-        )
+        # normalization layer for z1 and z2
+        self.bn = nn.BatchNorm1d(sizes[-1], affine=True)
 
 
-    def forward(self, y1, y2, b1, b2): # 2つの画像を入力
-        z1 = self.projector(self.backbone(y1))
-        z2 = self.projector(self.backbone(y2))
-        #z1 = self.projector(self.backbone(y1) - self.backbone(b1)) # 背景の特徴量を引いたものをzとする
-        #z2 = self.projector(self.backbone(y2) - self.backbone(b2)) # 背景の特徴量を引いたものをzとする
-        #z1 = self.projector(self.backbone(y1)) - self.projector(self.backbone(b1))
-        #z2 = self.projector(self.backbone(y2)) - self.projector(self.backbone(b2))
-        p1 = self.predictor(z1)
-        p2 = self.predictor(z2)
+    def forward(self, y1, y2, b1, b2): # 4つの画像を入力
+        z1 = self.projector(self.backbone(y1) - self.backbone(b1)) # 背景の特徴量を引いたものをzとする
+        z2 = self.projector(self.backbone(y2) - self.backbone(b2)) # 背景の特徴量を引いたものをzとする
 
-        # predictorを通らない側の逆伝播を固定
-        z1 = z1.detach()
-        z2 = z2.detach()
-
-        # lossは双方向
-        loss = -0.5 * (
-            nn.functional.cosine_similarity(p1, z2, dim=-1).mean() +
-            nn.functional.cosine_similarity(p2, z1, dim=-1).mean()
-        )
-
-        return loss
+        # empirical cross-correlation matrix
+        c = torch.mm(self.bn(z1).T, self.bn(z2))
+        c.div_(z1.shape[0])
+        # scaling
+        on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
+        off_diag = off_diagonal(c).pow_(2).sum()
+        loss = self.scale_factor * (on_diag + self.lambd * off_diag)
+        return loss, on_diag, off_diag # 確認用
     
 
-class LinearHead(nn.Module):
+class LinearHead(nn.Module): # 精度評価等に使う、一旦無視
     def __init__(self, backbone, num_classes:int):
         super().__init__()
         self.backbone = backbone

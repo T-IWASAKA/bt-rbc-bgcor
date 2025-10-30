@@ -35,7 +35,8 @@ class Trainer:
         assert config["image_size"] % config["patch_size"] == 0
         # keep track of the losses and accuracies
         base_dir = "/workspace/data" #後で追加
-        train_losses, test_losses = [], []
+        train_losses, train_on_diags, train_off_diags = [], [], []
+        test_losses, test_on_diags, test_off_diags = [], [], []
         
         # prep_earlystop
         patience = 10 # 性能が改善しないのを何エポックまで待つか
@@ -45,10 +46,17 @@ class Trainer:
 
         # training
         for i in range(config["epochs"]):
-            train_loss = self.train_epoch(trainloader)
-            test_loss = self.evaluate(testloader)
+            train_loss, train_on, train_off = self.train_epoch(trainloader)
+            test_loss, test_on, test_off  = self.evaluate(testloader)
+
             train_losses.append(train_loss)
+            train_on_diags.append(train_on)
+            train_off_diags.append(train_off)
             test_losses.append(test_loss)
+            test_on_diags.append(test_on)
+            test_off_diags.append(test_off)
+
+
             self.scheduler.step()
             current_lr = self.scheduler.get_last_lr()
 
@@ -62,6 +70,10 @@ class Trainer:
                     "epoch": i + 1,
                     "train_loss": train_loss,
                     "test_loss": test_loss,
+                    "train_on_diag": train_on,
+                    "test_on_diag": test_on,
+                    "train_off_diag": train_off,
+                    "test_off_diag": test_off,
                     "learning_rate": current_lr[0]
                 })
             # ▲▲▲ 変更ここまで ▲▲▲
@@ -100,7 +112,11 @@ class Trainer:
     def train_epoch(self, trainloader):
         """ train the model for one epoch """
         self.model.train()
+
         total_loss = 0
+        total_on_diag = 0
+        total_off_diag = 0
+
         for batch in trainloader:
             batch = [x.to(self.device) for x in batch] # batchをdeviceへ
             if len(batch) == 2:
@@ -108,13 +124,13 @@ class Trainer:
                 # 勾配を初期化
                 self.optimizer.zero_grad()
                 # forward / loss
-                loss = self.model(y1, y2) # attentionもNoneで返るので
+                loss, on_diag, off_diag = self.model(y1, y2) # attentionもNoneで返るので
             elif len(batch) == 4:
                 y1, y2, b1, b2 = batch
                 # 勾配を初期化
                 self.optimizer.zero_grad()
                 # forward / loss
-                loss = self.model(y1, y2, b1, b2) # attentionもNoneで返るので
+                loss, on_diag, off_diag = self.model(y1, y2, b1, b2) # attentionもNoneで返るので
             else:
                 raise ValueError('!! This is unexpected data format !!')
             # backpropagation
@@ -123,25 +139,37 @@ class Trainer:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0) # 外部からさわれるように
             # パラメータ更新
             self.optimizer.step()
-            total_loss += loss.item() # 本当なbatchsizeによる補正があったほうがいいかも 250714
+            total_loss += loss.item()
+            total_on_diag += on_diag.item() #
+            total_off_diag += off_diag.item() #
 
-        return total_loss / len(trainloader.dataset) # 全データセットのうちのいくらかという比率になっている
+        return total_loss/len(trainloader.dataset), total_on_diag/len(trainloader.dataset), total_off_diag/len(trainloader.dataset)# 全データセットのうちのいくらかという比率になっている
     
 
     @torch.no_grad()
     def evaluate(self, testloader):
         self.model.eval()
+
         total_loss = 0
+        total_on_diag = 0
+        total_off_diag = 0
+        
         with torch.no_grad():
             for batch in testloader:
                 batch = [x.to(self.device) for x in batch] # batchをdeviceへ
                 if len(batch) == 2:
                     y1, y2 = batch
-                    loss = self.model(y1, y2)
+                    loss, on_diag, off_diag = self.model(y1, y2)
                 elif len(batch) == 4:
                     y1, y2, b1, b2 = batch
                     # loss
-                    loss = self.model(y1, y2, b1, b2)
+                    loss, on_diag, off_diag = self.model(y1, y2, b1, b2)
                 total_loss += loss.item()
+                total_on_diag += on_diag.item() #
+                total_off_diag += off_diag.item() #
+
         avg_loss = total_loss / len(testloader.dataset)
-        return avg_loss
+        avg_on_diag = total_on_diag / len(testloader.dataset)
+        avg_off_diag = total_off_diag / len(testloader.dataset)
+
+        return avg_loss, avg_on_diag, avg_off_diag
